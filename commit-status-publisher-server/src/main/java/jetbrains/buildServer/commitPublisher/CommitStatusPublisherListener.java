@@ -232,17 +232,37 @@ public class CommitStatusPublisherListener extends BuildServerAdapter {
         logStatusNotPublished(event, LogUtil.describe(build), publisher, "commit status publishing is disabled");
         continue;
       }
-      List<BuildRevision> revisions = getBuildRevisionForVote(publisher, build);
-      if (revisions.isEmpty()) {
-        logStatusNotPublished(event, LogUtil.describe(build), publisher, "no compatible revisions found");
-        continue;
+      runForPublisher(event, build, task, publisher, build.getBranch(), false);
+    }
+    myProblems.clearObsoleteProblems(buildType, publishers.keySet());
+  }
+
+  private void runForPublisher(@NotNull Event event,
+                               @NotNull SBuild build,
+                               @NotNull PublishTask task,
+                               @NotNull CommitStatusPublisher publisher,
+                               Branch originalBranch,
+                               boolean publishingToDependency) {
+    if (publisher.isDependencyPublishingEnabled()) {
+      for (BuildPromotion bp : build.getBuildPromotion().getAllDependencies()) {
+        final SBuild associatedBuild = bp.getAssociatedBuild();
+        if (associatedBuild != null) {
+          runForPublisher(event, associatedBuild, task, publisher, originalBranch, true);
+        }
       }
-      myProblems.clearProblem(publisher);
-      for (BuildRevision revision: revisions) {
+    }
+
+    List<BuildRevision> revisions = getBuildRevisionForVote(publisher, build);
+    if (revisions.isEmpty()) {
+      logStatusNotPublished(event, LogUtil.describe(build), publisher, "no compatible revisions found");
+      return;
+    }
+    myProblems.clearProblem(publisher);
+    for (BuildRevision revision: revisions) {
+      if (shouldPublishStatus(publisher, revision, originalBranch, publishingToDependency)) {
         runTask(event, build.getBuildPromotion(), LogUtil.describe(build), task, publisher, revision);
       }
     }
-    myProblems.clearObsoleteProblems(buildType, publishers.keySet());
   }
 
   private void runForEveryPublisherQueued(@NotNull Event event, @NotNull SBuildType buildType, @NotNull SQueuedBuild build, @NotNull PublishTask task) {
@@ -266,17 +286,40 @@ public class CommitStatusPublisherListener extends BuildServerAdapter {
         logStatusNotPublished(event, LogUtil.describe(build), publisher, "commit status publishing is disabled");
         continue;
       }
-      List<BuildRevision> revisions = getQueuedBuildRevisionForVote(buildType, publisher, build);
-      if (revisions.isEmpty()) {
-        logStatusNotPublished(event, LogUtil.describe(build), publisher, "no compatible revisions found");
-        continue;
+      runForPublisherQueued(event, buildType, build, task, publisher, build.getBuildPromotion().getBranch(), false);
+    }
+    myProblems.clearObsoleteProblems(buildType, publishers.keySet());
+  }
+
+  private void runForPublisherQueued(@NotNull Event event,
+                                     @NotNull SBuildType buildType,
+                                     @NotNull SQueuedBuild build,
+                                     @NotNull PublishTask task,
+                                     @NotNull CommitStatusPublisher publisher,
+                                     Branch originalBranch,
+                                     boolean publishingToDependency) {
+    if (publisher.isDependencyPublishingEnabled()) {
+      for (BuildPromotion bp : build.getBuildPromotion().getAllDependencies()) {
+        final SQueuedBuild queuedBuild = bp.getQueuedBuild();
+        final SBuild associatedBuild = bp.getAssociatedBuild();
+        if (associatedBuild != null) {
+          runForPublisher(event, associatedBuild, task, publisher, originalBranch, true);
+        } else if (queuedBuild != null && bp.getBuildType() != null) {
+          runForPublisherQueued(event, bp.getBuildType(), queuedBuild, task, publisher, originalBranch, true);
+        }
       }
-      myProblems.clearProblem(publisher);
-      for (BuildRevision revision: revisions) {
+    }
+    List<BuildRevision> revisions = getQueuedBuildRevisionForVote(buildType, publisher, build);
+    if (revisions.isEmpty()) {
+      logStatusNotPublished(event, LogUtil.describe(build), publisher, "no compatible revisions found");
+      return;
+    }
+    myProblems.clearProblem(publisher);
+    for (BuildRevision revision : revisions) {
+      if (shouldPublishStatus(publisher, revision, originalBranch, publishingToDependency)) {
         runTask(event, build.getBuildPromotion(), LogUtil.describe(build), task, publisher, revision);
       }
     }
-    myProblems.clearObsoleteProblems(buildType, publishers.keySet());
   }
 
   private void runTask(@NotNull Event event,
@@ -390,5 +433,39 @@ public class CommitStatusPublisherListener extends BuildServerAdapter {
 
   private boolean shouldFailBuild(@NotNull SBuildType buildType) {
     return Boolean.valueOf(buildType.getParameters().get("teamcity.commitStatusPublisher.failBuildOnPublishError"));
+  }
+
+  private boolean shouldPublishStatus(@NotNull CommitStatusPublisher publisher,
+                                      @NotNull BuildRevision revision,
+                                      Branch originalBranch,
+                                      boolean publishingToDependency) {
+    if ("jetbrains.git".equals(revision.getRoot().getVcsName())) {
+      if (originalBranch != null && !originalBranch.isDefaultBranch() &&
+        !publisher.isPublishingUnmatchedBranchesEnabled() &&
+        Objects.equal(revision.getRoot().getProperty("branch"), revision.getRepositoryVersion().getVcsBranch())) {
+        // Don't publish to the default branch unless it was triggered by the default branch
+        // or we've enabled unmatched publishing
+        return false;
+      }
+
+      if (publishingToDependency) {
+        if (publisher.getDependencyPublishingWhitelistPattern() != null &&
+          !publisher.getDependencyPublishingWhitelistPattern().trim().isEmpty() &&
+          revision.getRoot().getProperty("url") != null &&
+          !revision.getRoot().getProperty("url").matches(publisher.getDependencyPublishingWhitelistPattern())) {
+          // Don't publish if the whitelist regex is set and doesn't match
+          return false;
+        }
+
+        if (publisher.getDependencyPublishingBlacklistPattern() != null &&
+          !publisher.getDependencyPublishingBlacklistPattern().trim().isEmpty() &&
+          revision.getRoot().getProperty("url") != null &&
+          revision.getRoot().getProperty("url").matches(publisher.getDependencyPublishingBlacklistPattern())) {
+          // Don't publish if the blacklist regex is set and matches
+          return false;
+        }
+      }
+    }
+    return true;
   }
 }
